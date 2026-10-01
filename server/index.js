@@ -34,6 +34,39 @@ const FLAVOR = {
 }
 const now = () => new Date().toLocaleString('zh-CN')
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
+
+/* ================= 零件商店：商品目录（服务端唯一事实来源） =================
+ * 商品名称、槽位、加成属性、加成数值与售价全部在此定义。购买接口只接受商品标识 key，
+ * 绝不接受客户端提交的 price / bonus / stat / slot / name，杜绝以极低价购入超高性能部件。
+ */
+const SHOP_SLOTS = ['引擎', '翼板', '氮气', '龙骨', '护甲']
+const SHOP_STATS = ['speed', 'turn', 'acc', 'dur']
+const SHOP_CATALOG = [
+  { key: 'race_turbo',  name: '竞速涡轮',     slot: '引擎', stat: 'speed', bonus: 14, price: 2600 },
+  { key: 'aero_board',  name: '流线翼板',     slot: '翼板', stat: 'speed', bonus: 9,  price: 1800 },
+  { key: 'nitro_boost', name: '氮气助推',     slot: '氮气', stat: 'acc',   bonus: 16, price: 2200 },
+  { key: 'gyro_rudder', name: '回旋舵',       slot: '龙骨', stat: 'turn',  bonus: 12, price: 2000 },
+  { key: 'mica_armor',  name: '云母护甲',     slot: '护甲', stat: 'dur',   bonus: 15, price: 2400 },
+  { key: 'light_alloy', name: '轻量合金',     slot: '翼板', stat: 'acc',   bonus: 11, price: 1900 },
+  { key: 'blue_engine', name: '蓝纹喷射引擎', slot: '引擎', stat: 'speed', bonus: 20, price: 3200 },
+  { key: 'hard_plate',  name: '硬壳鳞甲',     slot: '护甲', stat: 'dur',   bonus: 22, price: 3400 }
+]
+const shopItem = key => SHOP_CATALOG.find(i => i.key === key) || null
+// 启动自检：目录中的每一件商品都必须配置合法且 key 唯一，避免错误配置流入经济与比赛结算
+;(() => {
+  const keys = new Set()
+  for (const it of SHOP_CATALOG) {
+    const ok = typeof it.key === 'string' && it.key.length > 0
+      && typeof it.name === 'string' && it.name.length > 0
+      && SHOP_SLOTS.includes(it.slot)
+      && SHOP_STATS.includes(it.stat)
+      && Number.isInteger(it.bonus) && it.bonus > 0
+      && Number.isInteger(it.price) && it.price >= 0
+      && !keys.has(it.key)
+    if (!ok) throw new Error(`[SKY] 商品目录配置非法：${JSON.stringify(it)}`)
+    keys.add(it.key)
+  }
+})()
 // 确定性伪随机：同一场比赛的分段过程与事件只生成一次，之后回放永远一致
 function mulberry32(seed) {
   let a = seed >>> 0
@@ -52,10 +85,9 @@ function seed() {
   run('INSERT INTO pilots (name,skill,courage,exp,wage,mood) VALUES (?,?,?,?,?,?)', '奥罗·晨曦', 62, 58, 20, 80, 75)
   run('INSERT INTO pilots (name,skill,courage,exp,wage,mood) VALUES (?,?,?,?,?,?)', '莉娜·云涛', 55, 65, 8, 55, 82)
   run('INSERT INTO mechanics (name,skill,wage,mood) VALUES (?,?,?,?)', '格蕾丝·铆钉', 58, 45, 78)
-  const ups = [['竞速涡轮','引擎','speed',14,2600],['流线翼板','翼板','speed',9,1800],['氮气助推','氮气','acc',16,2200],
-    ['回旋舵','龙骨','turn',12,2000],['云母护甲','护甲','dur',15,2400],['轻量合金','翼板','acc',11,1900],
-    ['蓝纹喷射引擎','引擎','speed',20,3200],['硬壳鳞甲','护甲','dur',22,3400]]
-  ups.forEach(([n, slot, stat, bonus, price]) => run('INSERT INTO upgrades (name,slot,stat,bonus,price) VALUES (?,?,?,?,?)', n, slot, stat, bonus, price))
+  // 初始库存与商品目录同源：名称/槽位/属性/加成/价格均取自 SHOP_CATALOG
+  SHOP_CATALOG.forEach(({ name, slot, stat, bonus, price }) =>
+    run('INSERT INTO upgrades (name,slot,stat,bonus,price,level) VALUES (?,?,?,?,?,1)', name, slot, stat, bonus, price))
   const cir = [['晨雾浮岛','1','雾'],['雷鸣云谷','2','雷暴'],['翡翠群岛','3','晴'],['风暴裂谷','3','雨'],['极光穹顶','4','风'],['星界之巅','5','雾']]
   cir.forEach(([n, d, w]) => run('INSERT INTO circuits (name,diff,weather,bonus_pts) VALUES (?,?,?,?)', n, Number(d), w, Number(d) * 4))
   const spo = [['云帆工坊', 12, 4000, 8], ['星罗航空', 22, 8000, 15], ['流风动力', 32, 14000, 22], ['苍穹商会', 45, 22000, 32]]
@@ -382,6 +414,7 @@ const payload = () => {
   const raceRows = all("SELECT * FROM races WHERE status='settled' ORDER BY id DESC")
   return {
     team: t, airship: st, upgrades, pilots, mechanics, circuits, sponsors, log,
+    shopCatalog: SHOP_CATALOG,
     activeRace: parseRace(activeRow),
     races: raceRows.map(parseRace),
     seasonDone: done, seasonTotal: circuits.length
@@ -391,14 +424,32 @@ const payload = () => {
 app.get('/api/state', (_, res) => res.json(payload()))
 app.get('/api/overview', (_, res) => res.json(payload()))
 
-// 购买新升级件
+// 购买改装件：客户端只能提交商品标识 key；名称、槽位、加成属性/数值、售价一律取自
+// 服务端商品目录。客户端提交的 price/bonus/stat/slot/name 全部忽略，无法越权改写经济或性能。
 app.post('/api/shop', (req, res) => {
-  const { slot, stat, name, price, bonus } = req.body
-  const t = teamCore()
-  if (t.money < price) return res.json({ ok: false, msg: '资金不足' })
-  run('UPDATE team SET money=money-? WHERE id=1', price)
-  const r = run('INSERT INTO upgrades (name,slot,stat,bonus,price,level) VALUES (?,?,?,?,?,1)', name || '神秘部件', slot, stat, bonus, price)
-  res.json({ ok: true, msg: '已购入新部件', id: Number(r.lastInsertRowid) })
+  const key = typeof req.body?.key === 'string' ? req.body.key : null
+  const item = shopItem(key)
+  if (!item) return res.status(400).json({ ok: false, msg: '商品不存在或配置非法' })
+
+  let result
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    // 事务内重新读取余额并校验：并发购买也不会透支
+    const t = teamCore()
+    if (t.money < item.price) {
+      result = { ok: false, msg: '资金不足' }
+    } else {
+      run('UPDATE team SET money=money-? WHERE id=1', item.price)
+      const r = run('INSERT INTO upgrades (name,slot,stat,bonus,price,level) VALUES (?,?,?,?,?,1)',
+        item.name, item.slot, item.stat, item.bonus, item.price)
+      result = { ok: true, msg: '已购入新部件', id: Number(r.lastInsertRowid) }
+    }
+    db.exec('COMMIT')
+  } catch (e) {
+    db.exec('ROLLBACK')
+    throw e
+  }
+  res.json(result)
 })
 // 装备/卸下
 app.post('/api/equip/:id', (req, res) => {

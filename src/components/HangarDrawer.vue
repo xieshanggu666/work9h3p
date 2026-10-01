@@ -58,6 +58,21 @@ const perfList = () => [
           </div>
         </section>
 
+        <!-- 零件商店：商品与价格全部来自服务端目录，购买只提交 key -->
+        <section>
+          <div class="sec-h">
+            <b>🛒 零件商店</b><span class="d-sub">价格与性能以服务端配置为准</span>
+          </div>
+          <div class="up-grid">
+            <div v-for="g in store.shopCatalog" :key="g.key" class="up-card shop-card">
+              <div class="up-ico">{{ slotIco[g.slot] }}</div>
+              <div class="up-name">{{ g.name }}</div>
+              <div class="up-stat">+{{ g.bonus }} {{ statName[g.stat] }}</div>
+              <button class="btn sm primary" @click="store.buyPart(g.key)">购买 ¥{{ g.price }}</button>
+            </div>
+          </div>
+        </section>
+
         <!-- 机师 -->
         <section>
           <div class="sec-h">
