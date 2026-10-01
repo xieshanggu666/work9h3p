@@ -7,6 +7,13 @@ const statName = { speed: '速度', turn: '转向', acc: '加速', dur: '耐久'
 const perfList = () => [
   ['speed', '速度'], ['turn', '转向'], ['acc', '加速'], ['dur', '耐久']
 ].map(([k, l]) => ({ k, l, v: store.airship[k] || 0 }))
+// 已持有数量按服务端商品配置比对（名称/槽位/加成项/数值/价格），下单只传 id
+const ownedCount = it => store.upgrades.filter(u =>
+  u.name === it.name && u.slot === it.slot && u.stat === it.stat && u.bonus === it.bonus && u.price === it.price).length
+async function buy(it) {
+  const r = await store.shop(it.id)
+  if (r?.ok) store.tip(r.msg || '购买成功')
+}
 </script>
 
 <template>
@@ -53,6 +60,23 @@ const perfList = () => [
               <div class="up-stat">+{{ u.bonus }} {{ statName[u.stat] }}</div>
               <button class="btn sm" :class="u.equipped ? 'ghost' : 'primary'" @click="u.equipped ? store.unequip(u.id) : store.equip(u.id)">
                 {{ u.equipped ? '卸下' : '装备' }}
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <!-- 零件商店：价格与属性均来自服务端商品配置，点击即按 id 下单 -->
+        <section>
+          <div class="sec-h">
+            <b>🛒 零件商店</b><span class="d-sub">标价与性能由工坊核定，童叟无欺</span>
+          </div>
+          <div class="up-grid">
+            <div v-for="it in store.shop" :key="it.id" class="up-card">
+              <div class="up-ico">{{ slotIco[it.slot] }}</div>
+              <div class="up-name">{{ it.name }}</div>
+              <div class="up-stat">+{{ it.bonus }} {{ statName[it.stat] }}</div>
+              <button class="btn sm primary" :disabled="store.team.money < it.price" @click="buy(it)">
+                ¥{{ it.price.toLocaleString() }}<template v-if="ownedCount(it)"> · 已购{{ ownedCount(it) }}</template>
               </button>
             </div>
           </div>

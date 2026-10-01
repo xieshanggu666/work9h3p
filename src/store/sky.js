@@ -10,6 +10,8 @@ export const useSkyStore = defineStore('sky', {
     airship: s => s.state?.airship || {},
     circuits: s => s.state?.circuits || [],
     upgrades: s => s.state?.upgrades || [],
+    // 零件商店目录（价格/属性来自服务端配置，客户端不可改写）
+    shop: s => s.state?.shop || [],
     // 进行中（可中断续看）的比赛记录
     activeRace: s => s.state?.activeRace || null,
     // 历史比赛（已结算，可回放）
@@ -19,7 +21,8 @@ export const useSkyStore = defineStore('sky', {
     async init() { this.state = await j('/api/state'); this.loaded = true },
     async refresh() { this.state = await j('/api/state') },
     tip(msg) { this.toast = msg; setTimeout(() => this.toast = '', 2600) },
-    async shop(b) { const r = await post('/api/shop', b); await this.refresh(); if (!r.ok) this.tip(r.msg); return r },
+    // 下单只提交商品 id；价格、属性与加成一律由服务端按商品配置核定
+    async shop(id) { const r = await post('/api/shop', { id }); await this.refresh(); if (!r.ok) this.tip(r.msg); return r },
     async equip(id) { await post('/api/equip/' + id); await this.refresh() },
     async unequip(id) { await post('/api/unequip/' + id); await this.refresh() },
     async hirePilot() { const r = await post('/api/hire_pilot'); await this.refresh(); this.tip(r.msg) },

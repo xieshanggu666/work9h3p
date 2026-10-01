@@ -45,6 +45,32 @@ function mulberry32(seed) {
   }
 }
 
+/* ================= 零件商店：商品配置（服务端唯一事实来源） =================
+ * 客户端只能按 id 下单；名称、槽位、加成项、加成数值与价格一律由服务端从这份配置取值，
+ * 请求体中夹带的 price/bonus/stat/slot/name 一律忽略，杜绝「1 元购入 +9999 性能件」
+ * 之类越权改写经济与比赛性能的请求。
+ */
+const VALID_SLOTS = ['引擎', '翼板', '氮气', '龙骨', '护甲']
+const VALID_STATS = ['speed', 'turn', 'acc', 'dur']
+const SHOP_ITEMS = [
+  { id: 1, name: '竞速涡轮', slot: '引擎', stat: 'speed', bonus: 14, price: 2600 },
+  { id: 2, name: '流线翼板', slot: '翼板', stat: 'speed', bonus: 9, price: 1800 },
+  { id: 3, name: '氮气助推', slot: '氮气', stat: 'acc', bonus: 16, price: 2200 },
+  { id: 4, name: '回旋舵', slot: '龙骨', stat: 'turn', bonus: 12, price: 2000 },
+  { id: 5, name: '云母护甲', slot: '护甲', stat: 'dur', bonus: 15, price: 2400 },
+  { id: 6, name: '轻量合金', slot: '翼板', stat: 'acc', bonus: 11, price: 1900 },
+  { id: 7, name: '蓝纹喷射引擎', slot: '引擎', stat: 'speed', bonus: 20, price: 3200 },
+  { id: 8, name: '硬壳鳞甲', slot: '护甲', stat: 'dur', bonus: 22, price: 3400 }
+]
+const SHOP_MAP = new Map(SHOP_ITEMS.map(i => [i.id, i]))
+// 启动即自检：非法商品配置应在上线前暴露，而不是等玩家下单
+for (const it of SHOP_ITEMS) {
+  const ok = VALID_SLOTS.includes(it.slot) && VALID_STATS.includes(it.stat) &&
+    Number.isInteger(it.bonus) && it.bonus > 0 && it.bonus <= 100 &&
+    Number.isInteger(it.price) && it.price > 0 && typeof it.name === 'string' && it.name.trim()
+  if (!ok) throw new Error('[SKY] 商店商品配置非法：' + JSON.stringify(it))
+}
+
 function seed() {
   if (get('SELECT COUNT(*) c FROM team').c > 0) return
   run('INSERT INTO team (name) VALUES (?)', '苍穹疾风战队')
@@ -52,9 +78,7 @@ function seed() {
   run('INSERT INTO pilots (name,skill,courage,exp,wage,mood) VALUES (?,?,?,?,?,?)', '奥罗·晨曦', 62, 58, 20, 80, 75)
   run('INSERT INTO pilots (name,skill,courage,exp,wage,mood) VALUES (?,?,?,?,?,?)', '莉娜·云涛', 55, 65, 8, 55, 82)
   run('INSERT INTO mechanics (name,skill,wage,mood) VALUES (?,?,?,?)', '格蕾丝·铆钉', 58, 45, 78)
-  const ups = [['竞速涡轮','引擎','speed',14,2600],['流线翼板','翼板','speed',9,1800],['氮气助推','氮气','acc',16,2200],
-    ['回旋舵','龙骨','turn',12,2000],['云母护甲','护甲','dur',15,2400],['轻量合金','翼板','acc',11,1900],
-    ['蓝纹喷射引擎','引擎','speed',20,3200],['硬壳鳞甲','护甲','dur',22,3400]]
+  const ups = SHOP_ITEMS.map(i => [i.name, i.slot, i.stat, i.bonus, i.price])
   ups.forEach(([n, slot, stat, bonus, price]) => run('INSERT INTO upgrades (name,slot,stat,bonus,price) VALUES (?,?,?,?,?)', n, slot, stat, bonus, price))
   const cir = [['晨雾浮岛','1','雾'],['雷鸣云谷','2','雷暴'],['翡翠群岛','3','晴'],['风暴裂谷','3','雨'],['极光穹顶','4','风'],['星界之巅','5','雾']]
   cir.forEach(([n, d, w]) => run('INSERT INTO circuits (name,diff,weather,bonus_pts) VALUES (?,?,?,?)', n, Number(d), w, Number(d) * 4))
@@ -382,6 +406,7 @@ const payload = () => {
   const raceRows = all("SELECT * FROM races WHERE status='settled' ORDER BY id DESC")
   return {
     team: t, airship: st, upgrades, pilots, mechanics, circuits, sponsors, log,
+    shop: SHOP_ITEMS,
     activeRace: parseRace(activeRow),
     races: raceRows.map(parseRace),
     seasonDone: done, seasonTotal: circuits.length
@@ -391,14 +416,41 @@ const payload = () => {
 app.get('/api/state', (_, res) => res.json(payload()))
 app.get('/api/overview', (_, res) => res.json(payload()))
 
-// 购买新升级件
+// 商品目录（服务端配置，供前端渲染商店）：价格/属性均不在客户端可写
+app.get('/api/shop', (_, res) => res.json({ ok: true, items: SHOP_ITEMS }))
+
+// 购买改装件：客户端只能提交商品 id；名称、槽位、加成项、加成数值与价格全部以服务端
+// SHOP_ITEMS 配置为准，请求体里任何 price/bonus/stat/slot/name 都不会被采信。
 app.post('/api/shop', (req, res) => {
-  const { slot, stat, name, price, bonus } = req.body
-  const t = teamCore()
-  if (t.money < price) return res.json({ ok: false, msg: '资金不足' })
-  run('UPDATE team SET money=money-? WHERE id=1', price)
-  const r = run('INSERT INTO upgrades (name,slot,stat,bonus,price,level) VALUES (?,?,?,?,?,1)', name || '神秘部件', slot, stat, bonus, price)
-  res.json({ ok: true, msg: '已购入新部件', id: Number(r.lastInsertRowid) })
+  const rawId = req.body?.id
+  // 必须是 JSON 数值（拒绝字符串/布尔等可被 Number() 隐式转换的类型），且为正整数
+  if (typeof rawId !== 'number' || !Number.isInteger(rawId) || rawId <= 0) {
+    return res.status(400).json({ ok: false, msg: '商品编号无效' })
+  }
+  const item = SHOP_MAP.get(rawId)
+  if (!item) return res.status(400).json({ ok: false, msg: '该商品不存在' })
+
+  // 扣款与入库放在同一事务（BEGIN IMMEDIATE 立即取写锁）：余额检查与扣款原子完成，
+  // 并发请求不会在「检查通过→实际扣款」之间把资金扣成负数
+  let result
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    const t = teamCore()
+    if (t.money < item.price) {
+      result = { status: 400, body: { ok: false, msg: '资金不足', price: item.price } }
+    } else {
+      run('UPDATE team SET money=money-? WHERE id=1', item.price)
+      const r = run('INSERT INTO upgrades (name,slot,stat,bonus,price,level) VALUES (?,?,?,?,?,1)',
+        item.name, item.slot, item.stat, item.bonus, item.price)
+      result = { status: 200, body: { ok: true, msg: `已购入「${item.name}」`, id: Number(r.lastInsertRowid), price: item.price } }
+    }
+    db.exec('COMMIT')
+  } catch (e) {
+    db.exec('ROLLBACK')
+    console.error('[SKY] 购买失败', e)
+    result = { status: 500, body: { ok: false, msg: '购买失败，请重试' } }
+  }
+  return res.status(result.status).json(result.body)
 })
 // 装备/卸下
 app.post('/api/equip/:id', (req, res) => {
